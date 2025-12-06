@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <title>Поиск заказа</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 0 16px;
+        }
+        h1 {
+            font-size: 24px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        input[type="text"] {
+            width: 100%;
+            max-width: 400px;
+            padding: 8px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        button {
+            margin-top: 12px;
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .error {
+            color: #b00020;
+            margin-top: 12px;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 12px;
+            border-radius: 4px;
+            background: #f5f5f5;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+<h1>Поиск заказа</h1>
+
+<label for="order-id">ID заказа (order_uid)</label>
+<input id="order-id" type="text" placeholder="b563feb7b2b84b6test" />
+
+<div>
+    <button id="load-order">Найти заказ</button>
+</div>
+
+<div id="error" class="error"></div>
+
+<div id="result" class="result" style="display:none;"></div>
+
+<script>
+    const input = document.getElementById('order-id');
+    const btn = document.getElementById('load-order');
+    const errorBox = document.getElementById('error');
+    const resultBox = document.getElementById('result');
+
+    btn.addEventListener('click', async () => {
+        const id = input.value.trim();
+        errorBox.textContent = '';
+        resultBox.style.display = 'none';
+        resultBox.textContent = '';
+
+        if (!id) {
+            errorBox.textContent = 'Введите ID заказа.';
+            return;
+        }
+
+        try {
+            const resp = await fetch(`/order/${encodeURIComponent(id)}`);
+
+            if (!resp.ok) {
+                const text = await resp.text();
+                errorBox.textContent = `Ошибка: ${resp.status} ${resp.statusText} — ${text}`;
+                return;
+            }
+
+            const data = await resp.json();
+
+            // Либо выводим сырой JSON:
+            resultBox.textContent = JSON.stringify(data, null, 2);
+            resultBox.style.display = 'block';
+
+            // Либо можно тут же красиво разложить по полям (delivery, payment, items и т.д.)
+        } catch (e) {
+            console.error(e);
+            errorBox.textContent = 'Не удалось получить данные. Проверьте, что сервер запущен.';
+        }
+    });
+
+    // Нажатие Enter в инпуте = нажать кнопку
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            btn.click();
+        }
+    });
+</script>
+</body>
+</html>
