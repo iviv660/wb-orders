@@ -1,269 +1,162 @@
 # Orders Service
 
-Сервис для обработки и хранения заказов. Получает заказы из Kafka, сохраняет их в PostgreSQL и предоставляет HTTP API для получения заказов по UUID.
+Сервис принимает заказы из Kafka, валидирует и сохраняет их в PostgreSQL, а затем отдаёт через HTTP API с кэшем в памяти. Проект готов для контейнерного запуска и включает инструменты для локальной разработки, миграций и наблюдаемости.
+
+## Ключевые возможности
+- Консьюмер Kafka с подтверждением смещений и DLQ для проблемных сообщений.
+- Сохранение заказов, доставок, платежей и товаров в PostgreSQL.
+- In-memory кэш с TTL и фоном очистки для быстрых повторных чтений.
+- HTTP API v1 по UUID заказа с OpenAPI-описанием и Redoc-документацией.
+- Экспонирование метрик и трассировок через OpenTelemetry.
 
 ## Архитектура
 
-Проект следует принципам чистой архитектуры:
+### Как устроено приложение
+- **Слои**: HTTP-слой (chi + ogen), доменный сервис заказов, инфраструктурные адаптеры (Kafka consumer/producer, PostgreSQL), in-memory кэш.
+- **Паттерны**: DI через `internal/app/di.go`, конфигурация через env, репозиторий/сервис для изоляции хранения, сигналы graceful shutdown через контекст.
+- **Телеметрия**: единая инициализация OpenTelemetry в `internal/app/app.go` (трейсы и метрики), логирование через Zap.
 
+### Основные компоненты
+- **Точка входа** (`cmd/main.go`): собирает приложение, поднимает HTTP-сервер и воркер Kafka, ловит сигналы и закрывает ресурсы.
+- **Инициализация** (`internal/app/app.go`): загружает конфигурацию, настраивает телеметрию и логгер, готовит HTTP-сервер, регистрирует завершалки.
+- **DI-контейнер** (`internal/app/di.go`): строит пул `pgx`, Kafka reader/writer, репозиторий PostgreSQL, кэш заказов, сервис домена и воркер с DLQ.
+- **HTTP слой** (`internal/http/v1`): сгенерированный сервер из `api/openapi.yaml`, хэндлер `GET /order/{orderUID}`, Redoc (`/docs`) и отдача OpenAPI-файла (`/openapi.yaml`).
+- **Доменный сервис** (`internal/service/order`): решает, брать ли заказ из кэша или из БД, обновляет кэш и возвращает агрегированные данные.
+- **Хранилище** (`internal/repository/order`): чтение/запись заказов через `pgx/v5`; схема описана в `migrations/000001_init_schema.up.sql`.
+- **Кэш** (`internal/cache/memory`): потокобезопасный in-memory TTL-кэш с фоновым GC и ограничением по времени жизни записей.
+- **Worker** (`internal/worker/order`): читает сообщения Kafka, валидирует, пишет в БД, отправляет сбойные сообщения в DLQ.
+
+### Поток данных (run-time)
+1. **Приём заказов**: Kafka consumer получает сообщение → валидирует → пишет заказ в PostgreSQL через репозиторий → при ошибке пересылает сообщение в DLQ и логирует событие.
+2. **Выдача заказов**: HTTP-хэндлер принимает UUID → сервис проверяет кэш → при отсутствии читает из БД → сохраняет в кэш на TTL → возвращает клиенту.
+
+### Схема коммуникаций
 ```
-cmd/
-  └── main.go              # Точка входа приложения
-internal/
-  ├── adapter/             # Адаптеры внешних систем
-  │   └── kafka/          # Kafka consumer
-  ├── api/                # HTTP API слой
-  │   └── v1/             # Версия API
-  ├── app/                # Инициализация приложения и DI
-  ├── config/             # Конфигурация
-  ├── model/              # Доменные модели
-  ├── repository/         # Слой работы с БД
-  │   ├── converter/      # Конвертеры между слоями
-  │   └── order/          # Реализация репозитория заказов
-  └── service/            # Бизнес-логика
-      └── order/           # Сервис заказов
-```
-
-## Функциональность
-
-- **Kafka Consumer**: Получение заказов из Kafka топика
-- **PostgreSQL**: Хранение заказов, доставок, платежей и товаров
-- **HTTP API**: REST API для получения заказов по UUID
-- **In-memory Cache**: Кеширование заказов для быстрого доступа
-
-## Требования
-
-### Для запуска через Docker Compose (рекомендуется)
-- Docker 20.10+
-- Docker Compose 2.0+
-
-### Для локального запуска
-- Go 1.25+
-- PostgreSQL 12+
-- Kafka (для consumer)
-
-## Установка
-
-1. Клонируйте репозиторий:
-```bash
-git clone https://github.com/iviv660/wb-orders
-cd wb
+Kafka -> internal/worker/order -> internal/repository/order -> PostgreSQL
+                     |
+                     v
+                internal/service/order <-> internal/cache/memory
+                             |
+                             v
+                        internal/http/v1
 ```
 
-### Вариант 1: Запуск через Docker Compose (рекомендуется)
+### Как ориентироваться в коде
+- `api/` — OpenAPI-описание и сгенерированный chi/ogen сервер.
+- `cmd/` — точка входа приложения и wiring.
+- `internal/app/` — DI, конфигурация, телеметрия, lifecycle.
+- `internal/cache/` — реализация TTL-кэша с GC.
+- `internal/http/v1/` — HTTP-ручки, middleware, рендер ошибок.
+- `internal/worker/order/` — консьюмер Kafka + DLQ.
+- `internal/service/order/` — доменная логика заказа/кэша.
+- `internal/repository/order/` — доступ к PostgreSQL.
 
-Все зависимости (PostgreSQL, Kafka, Zookeeper) будут запущены автоматически:
+## Стек технологий
+- Go 1.25
+- PostgreSQL 15
+- Kafka + Zookeeper
+- Chi, ogen (OpenAPI server generation)
+- segmentio/kafka-go
+- pgx/v5
+- OpenTelemetry + Zap
+- Docker, Docker Compose
 
-```bash
-# Запустить все сервисы
-docker-compose up -d
+## Запуск через Docker Compose
+1. Установите Docker и Docker Compose.
+2. Соберите зависимости и поднимите инфраструктуру:
+   ```bash
+   docker-compose up -d
+   ```
+   Будут запущены PostgreSQL, Kafka+Zookeeper, Kafka UI и приложение.
+3. Просмотреть логи приложения:
+   ```bash
+   docker-compose logs -f app
+   ```
+4. Остановить окружение:
+   ```bash
+   docker-compose down
+   ```
+   Для полной очистки данных добавьте флаг `-v`.
 
-# Просмотр логов приложения
-docker-compose logs -f app
+После запуска:
+- API: http://localhost:8080
+- OpenAPI: http://localhost:8080/openapi.yaml
+- Документация: http://localhost:8080/docs
+- Kafka UI: http://localhost:8081
+- PostgreSQL: localhost:5432
+- Kafka broker: localhost:9092
 
-# Остановить все сервисы
-docker-compose down
-
-# Остановить и удалить volumes (очистить данные)
-docker-compose down -v
-```
-
-После запуска будут доступны:
-- **HTTP API**: http://localhost:8080
-- **Kafka UI**: http://localhost:8081 (веб-интерфейс для управления Kafka)
-- **PostgreSQL**: localhost:5432
-- **Kafka**: localhost:9092
-
-### Вариант 2: Локальный запуск
-
-2. Установите зависимости:
-```bash
-go mod download
-```
-
-3. Настройте базу данных:
-```bash
-# Создайте базу данных
-createdb wb
-
-# Примените миграции
-psql -d wb -f migrations/000001_init_schema.up.sql
-```
-
-4. Запустите Kafka и Zookeeper локально или используйте Docker Compose только для инфраструктуры:
-```bash
-# Запустить только инфраструктуру (без приложения)
-docker-compose up -d postgres zookeeper kafka kafka-ui
-```
+## Локальная разработка без контейнеров
+1. Установите Go 1.25+, PostgreSQL 15+, Kafka и Zookeeper.
+2. Загрузите модули:
+   ```bash
+   go mod download
+   ```
+3. Создайте базу и примените миграции:
+   ```bash
+   createdb wb
+   psql -d wb -f migrations/000001_init_schema.up.sql
+   ```
+4. Поднимите инфраструктуру отдельно (при желании):
+   ```bash
+   docker-compose up -d postgres zookeeper kafka kafka-ui
+   ```
+5. Задайте переменные окружения (или используйте `.env`):
+   ```env
+   HTTP_ADDR=:8080
+   POSTGRES_DSN=postgres://user:password@localhost:5432/wb?sslmode=disable
+   KAFKA_BROKERS=localhost:9092
+   KAFKA_TOPIC=orders
+   KAFKA_DLQ_TOPIC=orders.dlq
+   KAFKA_GROUP_ID=orders-consumer
+   CACHE_TTL=5m
+   LOG_LEVEL=info
+   LOG_JSON=false
+   ```
+6. Запустите приложение:
+   ```bash
+   go run ./cmd
+   ```
 
 ## Конфигурация
+Ключевые переменные окружения и их значения по умолчанию:
 
-Приложение использует переменные окружения для конфигурации:
+| Переменная         | Назначение                              | По умолчанию                                               |
+|--------------------|-----------------------------------------|------------------------------------------------------------|
+| `HTTP_ADDR`        | Адрес HTTP-сервера                      | `:8080`                                                    |
+| `POSTGRES_DSN`     | DSN для подключения к PostgreSQL        | `postgres://user:password@localhost:5432/wb?sslmode=disable` |
+| `KAFKA_BROKERS`    | Брокеры Kafka (через запятую)           | `localhost:9092`                                           |
+| `KAFKA_TOPIC`      | Топик для чтения заказов                | `orders`                                                   |
+| `KAFKA_DLQ_TOPIC`  | Топик для записи некорректных сообщений | `orders.dlq`                                               |
+| `KAFKA_GROUP_ID`   | Group ID консьюмера                     | `orders-consumer`                                          |
+| `CACHE_TTL`        | TTL in-memory кэша                      | `5m`                                                       |
+| `LOG_LEVEL`        | Уровень логирования                     | `info`                                                     |
+| `LOG_JSON`         | Формат логов в JSON (true/false)        | `false`                                                    |
 
-| Переменная | Описание | Значение по умолчанию |
-|------------|----------|----------------------|
-| `HTTP_ADDR` | Адрес HTTP сервера | `:8080` |
-| `POSTGRES_DSN` | DSN для подключения к PostgreSQL | `postgres://user:password@localhost:5432/wb?sslmode=disable` |
-| `KAFKA_BROKERS` | Адреса Kafka брокеров (через запятую) | `localhost:9092` |
-| `KAFKA_TOPIC` | Название Kafka топика | `orders` |
-| `KAFKA_GROUP_ID` | ID группы Kafka consumer | `orders-consumer` |
+## API v1
+- **Получить заказ по UUID**
+  ```http
+  GET /order/{orderUID}
+  ```
+- Пример:
+  ```bash
+  curl http://localhost:8080/order/b563feb7b2b84b6test
+  ```
+- Формат ответа описан в `api/openapi.yaml`; интерактивная документация доступна по `/docs`.
 
-Пример `.env` файла:
-```env
-HTTP_ADDR=:8080
-POSTGRES_DSN=postgres://user:password@localhost:5432/wb?sslmode=disable
-KAFKA_BROKERS=localhost:9092
-KAFKA_TOPIC=orders
-KAFKA_GROUP_ID=orders-consumer
-```
+## Миграции и схема
+Базовая схема создаёт четыре таблицы: `orders` (основные данные), `deliveries`, `payments` и `items`, связанные через `order_uid`.
+Запустите миграции из `migrations/000001_init_schema.up.sql` перед стартом приложения.
 
-## Запуск
+## Тестирование и качество
+- Запуск юнит-тестов: `go test ./...`
+- Форматирование: `go fmt ./...`
+- Линтинг (если установлен): `golangci-lint run`
 
-### Через Docker Compose
-
-```bash
-# Запустить все сервисы (включая приложение)
-docker-compose up -d
-
-# Пересобрать и запустить приложение
-docker-compose up -d --build app
-```
-
-### Локальный запуск
-
-```bash
-go run cmd/main.go
-```
-
-Или соберите бинарник:
-```bash
-go build -o orders-service cmd/main.go
-./orders-service
-```
-
-Приложение поддерживает graceful shutdown при получении сигналов SIGINT или SIGTERM.
-
-## API
-
-### Получить заказ по UUID
-
-```http
-GET /order/{orderUID}
-```
-
-**Пример запроса:**
-```bash
-curl http://localhost:8080/order/b563feb7b2b84b6test
-```
-
-**Пример ответа:**
-```json
-{
-  "order_id": "b563feb7b2b84b6test",
-  "track_number": "WBILMTESTTRACK",
-  "entry": "WBIL",
-  "locale": "en",
-  "internal_signature": "",
-  "customer_id": "test",
-  "delivery_service": "meest",
-  "shard_key": "9",
-  "sm_id": 99,
-  "date_created": "2021-11-26T06:22:19Z",
-  "off_shard": "1",
-  "delivery": {
-    "name": "Test Testov",
-    "phone": "+9720000000",
-    "zip": "2639809",
-    "city": "Kiryat Mozkin",
-    "address": "Ploshad Mira 15",
-    "region": "Kraiot",
-    "email": "test@gmail.com"
-  },
-  "payment": {
-    "transaction": "b563feb7b2b84b6test",
-    "request_id": "",
-    "currency": "USD",
-    "provider": "wbpay",
-    "amount": 1817,
-    "payment_dt": 1637907727,
-    "bank": "alpha",
-    "delivery_cost": 1500,
-    "goods_total": 317,
-    "custom_fee": 0
-  },
-  "items": [
-    {
-      "chrt_id": "9934930",
-      "track_number": "WBILMTESTTRACK",
-      "price": 453,
-      "rid": "ab4219087a764ae0btest",
-      "name": "Mascaras",
-      "sale": 30,
-      "size": "0",
-      "total_price": 317,
-      "nm_id": 2389212,
-      "brand": "Vivienne Sabo",
-      "status": 202
-    }
-  ]
-}
-```
-
-## Структура базы данных
-
-Проект использует PostgreSQL со следующими таблицами:
-
-- `orders` - основная информация о заказах
-- `deliveries` - информация о доставке
-- `payments` - информация о платежах
-- `items` - товары в заказе
-
-Подробности в файлах миграций: `migrations/000001_init_schema.up.sql`
-
-## Разработка
-
-### Запуск тестов
-```bash
-go test ./...
-```
-
-### Форматирование кода
-```bash
-go fmt ./...
-```
-
-### Линтинг
-```bash
-golangci-lint run
-```
-
-## Docker
-
-Проект включает `Dockerfile` и `docker-compose.yml` для удобного развертывания.
-
-### Сборка образа
-
+## Сборка Docker-образа
 ```bash
 docker build -t orders-service .
 ```
 
-### Docker Compose сервисы
-
-- **postgres** - PostgreSQL 15 с автоматическим применением миграций
-- **zookeeper** - Zookeeper для Kafka
-- **kafka** - Kafka broker с автосозданием топиков
-- **kafka-ui** - Веб-интерфейс для управления Kafka (порт 8081)
-- **app** - Приложение Orders Service
-
-Все сервисы связаны через внутреннюю сеть и имеют health checks для правильной последовательности запуска.
-
-## Технологии
-
-- **Go 1.25+** - основной язык
-- **Chi** - HTTP роутер
-- **pgx/v5** - PostgreSQL драйвер
-- **segmentio/kafka-go** - Kafka клиент
-- **PostgreSQL** - база данных
-- **Kafka** - message broker
-- **Docker** - контейнеризация
-
+## Лицензия
+MIT, если не указано иное в исходниках.
