@@ -1,16 +1,20 @@
 package kafka
 
 import (
+	"context"
+
 	"github.com/segmentio/kafka-go"
 )
 
-type Consumer struct {
-	reader *kafka.Reader
+type Reader interface {
+	FetchMessage(ctx context.Context) (kafka.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
 }
 
-func New(reader *kafka.Reader) *Consumer {
-	c := &Consumer{
-		reader: reader,
-	}
-	return c
+type Consumer struct {
+	reader Reader
+}
+
+func New(reader Reader) *Consumer {
+	return &Consumer{reader: reader}
 }

@@ -1,11 +1,20 @@
 package order
 
-import "github.com/jackc/pgx/v5/pgxpool"
+import (
+	"context"
 
-type OrderRepository struct {
-	pool *pgxpool.Pool
+	"github.com/jackc/pgx/v5"
+)
+
+type Pool interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-func New(pool *pgxpool.Pool) *OrderRepository {
+type OrderRepository struct {
+	pool Pool
+}
+
+func New(pool Pool) *OrderRepository {
 	return &OrderRepository{pool: pool}
 }

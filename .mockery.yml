@@ -1,0 +1,43 @@
+all: false
+recursive: true
+log-level: info
+formatter: goimports
+force-file-write: true
+template: testify
+
+packages:
+  app/internal/service:
+    interfaces:
+      Service:
+        config:
+          dir: internal/mocks
+          pkgname: mocks
+          filename: MockService.go
+          structname: MockService
+
+  app/internal/repository:
+    interfaces:
+      Repository:
+        config:
+          dir: internal/mocks
+          pkgname: mocks
+          filename: MockRepository.go
+          structname: MockRepository
+
+  app/internal/cache:
+    interfaces:
+      Cache:
+        config:
+          dir: internal/mocks
+          pkgname: mocks
+          filename: MockCache.go
+          structname: MockCache
+
+  app/internal/adapter:
+    interfaces:
+      Consumer:
+        config:
+          dir: internal/mocks
+          pkgname: mocks
+          filename: MockConsumer.go
+
