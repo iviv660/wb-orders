@@ -17,11 +17,6 @@ type logger struct {
 
 type Key string
 
-const (
-	traceIDKey Key = "trace_id"
-	userIDKey  Key = "user_id"
-)
-
 var (
 	globalLogger *logger
 	initOnce     sync.Once
@@ -43,7 +38,7 @@ func Init(levelStr string, asJson bool, otelLP *sdklog.LoggerProvider) error {
 
 		coreStdout := zapcore.NewCore(encoder, zapcore.AddSync(os.Stdout), dynamicLevel)
 
-		var core zapcore.Core = coreStdout
+		core := coreStdout
 		if otelLP != nil {
 			coreOTel := otelzap.NewCore(
 				"app/logger",

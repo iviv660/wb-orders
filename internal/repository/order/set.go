@@ -47,7 +47,15 @@ func (o *OrderRepository) SetOrder(ctx context.Context, order service.Order) err
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		rbErr := tx.Rollback(ctx)
+		_ = rbErr
+	}()
 
 	if _, err := tx.Exec(ctx, insertOrderQuery,
 		order.OrderUUID,
@@ -113,5 +121,9 @@ func (o *OrderRepository) SetOrder(ctx context.Context, order service.Order) err
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
