@@ -3,19 +3,40 @@ services:
     image: postgres:15-alpine
     container_name: wb-postgres
     environment:
+      POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+    networks: [wb-network]
+
+  migrate:
+    image: postgres:15-alpine
+    container_name: wb-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: >
+      sh -c "
+        set -e;
+        for f in /migrations/*.up.sql; do
+          [ -f \"$$f\" ] || continue;
+          echo \"apply $$f\";
+          psql -h ${POSTGRES_HOST} -p 5432 -U ${POSTGRES_USER} -d ${POSTGRES_DB} -v ON_ERROR_STOP=1 -f \"$$f\";
+        done;
+        echo 'migrations applied';
+      "
     networks: [wb-network]
 
   zookeeper:
@@ -40,6 +61,8 @@ services:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks: [wb-network]
@@ -53,23 +76,8 @@ services:
       - "8081:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-    networks: [wb-network]
-
-  # ---------- OpenTelemetry Collector ----------
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.121.0
-    container_name: wb-otel-collector
-    command: ["--config=/etc/otelcol/config.yaml"]
-    volumes:
-      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
-    ports:
-      - "4317:4317"
-      - "4318:4318"
-      - "8889:8889"
-    depends_on:
-      - jaeger
-      - elasticsearch
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ${KAFKA_BROKERS}
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     networks: [wb-network]
 
   jaeger:
@@ -103,6 +111,21 @@ services:
       - elasticsearch
     networks: [wb-network]
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.121.0
+    container_name: wb-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      - jaeger
+      - elasticsearch
+    networks: [wb-network]
+
   prometheus:
     image: prom/prometheus:v2.55.0
     container_name: wb-prometheus
@@ -114,7 +137,6 @@ services:
       - otel-collector
     networks: [wb-network]
 
-  # ---------- Application ----------
   app:
     build:
       context: .
@@ -123,6 +145,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       kafka:
         condition: service_started
       otel-collector:
@@ -136,7 +160,9 @@ services:
       KAFKA_TOPIC: ${KAFKA_TOPIC}
       KAFKA_GROUP_ID: ${KAFKA_GROUP_ID}
       KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC}
-
+      CACHE_TTL: ${CACHE_TTL}
+      LOG_LEVEL: ${LOG_LEVEL}
+      LOG_JSON: ${LOG_JSON}
       APP_ENV: ${APP_ENV}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
