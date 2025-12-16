@@ -1,152 +1,173 @@
 # Orders Service
 
-Сервис обрабатывает заказы, поступающие из Kafka, сохраняет их в PostgreSQL и предоставляет HTTP API для чтения по UUID. Проект рассчитан на контейнеризированный запуск, но поддерживает и локальную разработку.
+Сервис принимает заказы из Kafka, валидирует и сохраняет их в PostgreSQL, а затем отдаёт через HTTP API с кэшем в памяти. Репозиторий включает Docker Compose-окружение, миграции БД и минимальный стек наблюдаемости через OpenTelemetry Collector.
 
-## Возможности
-- Потребление заказов из Kafka с подтверждением смещения.
-- Хранение заказов, доставок, платежей и товаров в PostgreSQL.
-- In-memory кэш для ускорения повторных чтений.
-- HTTP API с версионированием (`/order/{orderUID}`).
-- Готовые Docker Compose сервисы для локального окружения.
-- Набор миграций для первичной схемы базы.
+## Ключевые возможности
+- Консьюмер Kafka с подтверждением смещений и DLQ для проблемных сообщений.
+- Сохранение заказов, доставок, платежей и товаров в PostgreSQL.
+- Потокобезопасный in-memory кэш с TTL и фоновым GC для ускорения чтения.
+- HTTP API v1 по UUID заказа с OpenAPI-описанием и Redoc-документацией.
+- Экспонирование трасс, метрик и логов через OpenTelemetry SDK → OTLP.
 
-## Технологии
-- Go 1.25
+## Архитектура
+
+### Слои и ответственность
+- **Входная точка** (`cmd/main.go`): инициализирует приложение, поднимает HTTP и Kafka worker, обрабатывает завершение по сигналам, инициирует graceful shutdown через общий closer.
+- **App bootstrap** (`internal/app/app.go`): последовательно настраивает конфигурацию, OpenTelemetry, логгер, DI-контейнер, инфраструктуру, HTTP listener и сервер; регистрирует закрытие ресурсов.
+- **DI-контейнер** (`internal/app/di.go`): собирает пул `pgx`, Kafka reader/writer, репозиторий PostgreSQL, кэш заказов, доменный сервис и воркер с DLQ.
+- **HTTP слой** (`internal/http/v1`): сгенерированный chi/ogen-сервер, отдача `openapi.yaml`, Redoc по `/docs`, метрики/трейсы через `otelhttp` middleware.
+- **Доменный сервис** (`internal/service/order`): решает, читать ли заказ из кэша или БД, обновляет кэш и возвращает агрегированные данные.
+- **Хранилище** (`internal/repository/order`): чтение/запись заказов через `pgx/v5`; схема описана в `migrations/000001_init_schema.up.sql`.
+- **Кэш** (`internal/cache/memory`): in-memory TTL-кэш с фоновой очисткой и потокобезопасными операциями.
+- **Worker** (`internal/worker/order`): читает сообщения Kafka, валидирует payload, пишет в БД, при ошибке шлёт в DLQ и логирует событие.
+
+### Поток данных (runtime)
+1. **Приём заказов**: Kafka consumer получает сообщение → валидирует → пишет заказ в PostgreSQL через репозиторий → при ошибке пересылает сообщение в DLQ.
+2. **Выдача заказов**: HTTP-хэндлер принимает UUID → сервис проверяет кэш → при отсутствии читает из БД → сохраняет в кэш на TTL → возвращает клиенту.
+
+### Карта пакетов
+- `api/` — OpenAPI-описание и сгенерированный chi/ogen сервер.
+- `cmd/` — точка входа приложения и wiring.
+- `internal/app/` — DI, конфигурация, телеметрия, lifecycle.
+- `internal/cache/` — реализация TTL-кэша с GC.
+- `internal/http/v1/` — HTTP-ручки, middleware, рендер ошибок.
+- `internal/worker/order/` — консьюмер Kafka + DLQ.
+- `internal/service/order/` — доменная логика заказа/кэша.
+- `internal/repository/order/` — доступ к PostgreSQL.
+- `internal/otelx/` — инициализация OpenTelemetry SDK (трейсы, метрики, логи).
+
+## Стек технологий
+- Go 1.25.5
 - PostgreSQL 15
 - Kafka + Zookeeper
-- Chi (HTTP роутер)
+- Chi, ogen (OpenAPI server generation)
 - segmentio/kafka-go
 - pgx/v5
-- OpenTelemetry + Zap для логирования и метрик
+- OpenTelemetry SDK + Zap
+- Docker, Docker Compose
 
-## Архитектура проекта
-```
-cmd/
-  └── main.go              # Точка входа приложения
-internal/
-  ├── adapter/             # Интеграции с внешними системами
-  │   └── kafka/           # Kafka consumer
-  ├── api/                 # HTTP слой (v1)
-  ├── app/                 # Инициализация приложения и DI
-  ├── config/              # Работа с конфигурацией
-  ├── model/               # Доменные модели
-  ├── repository/          # Доступ к данным (PostgreSQL)
-  └── service/             # Бизнес-логика
-migrations/                # SQL-миграции схемы
-docker-compose.yml         # Инфраструктура и приложение
-Dockerfile                 # Сборка образа приложения
-```
+## Запуск через Docker Compose
+1. Создайте `.env` рядом с `docker-compose.yml` (значения по умолчанию ниже):
+   ```env
+   POSTGRES_USER=postgres
+   POSTGRES_PASSWORD=postgres
+   POSTGRES_DB=wb
+   POSTGRES_PORT=5432
 
-## Быстрый старт (Docker Compose)
-Рекомендуемый способ поднять все зависимости и приложение.
+   HTTP_PORT=8080
+   HTTP_ADDR=:8080
+   POSTGRES_DSN=postgres://postgres:postgres@postgres:5432/wb?sslmode=disable
+   KAFKA_BROKERS=kafka:9092
+   KAFKA_TOPIC=orders
+   KAFKA_GROUP_ID=orders-consumer
+   KAFKA_DLQ_TOPIC=orders.dlq
 
-```bash
-# Запустить все сервисы (PostgreSQL, Kafka, Kafka UI, приложение)
-docker-compose up -d
+   APP_ENV=local
+   OTEL_SERVICE_NAME=wb-orders
+   OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+   OTEL_EXPORTER_OTLP_INSECURE=true
+   OTEL_RESOURCE_ATTRIBUTES=service.name=wb-orders,service.version=local
+   ```
+2. Соберите окружение:
+   ```bash
+   docker-compose up -d
+   ```
+   Будут запущены PostgreSQL, Kafka+Zookeeper, Kafka UI, OpenTelemetry Collector, Jaeger, Elasticsearch, Kibana, Prometheus и приложение.
+3. Логи приложения:
+   ```bash
+   docker-compose logs -f app
+   ```
+4. Остановка окружения:
+   ```bash
+   docker-compose down
+   ```
+   Добавьте `-v` для удаления данных.
 
-# Смотреть логи приложения
-docker-compose logs -f app
-
-# Остановить сервисы
-docker-compose down
-
-# Полная очистка данных
-docker-compose down -v
-```
-
-После запуска доступны:
-- HTTP API: http://localhost:8080
+После запуска:
+- API: http://localhost:8080
+- OpenAPI: http://localhost:8080/openapi.yaml
+- Документация: http://localhost:8080/docs
 - Kafka UI: http://localhost:8081
+- Jaeger UI: http://localhost:16686
+- Kibana: http://localhost:5601 (индексы `otel-*`)
+- Prometheus: http://localhost:9090 (требует `prometheus.yml` рядом с `docker-compose.yml`)
 - PostgreSQL: localhost:5432
 - Kafka broker: localhost:9092
 
-## Локальная разработка (без контейнеров)
-1. Установите зависимости:
-   - Go 1.25+
-   - PostgreSQL 15+
-   - Kafka + Zookeeper
+> Примечание: сервис Prometheus ожидает файл `prometheus.yml`; если он отсутствует, создайте минимальный конфиг или уберите сервис из `docker-compose.yml` перед запуском.
 
-2. Скачайте модули:
+## Локальная разработка без контейнеров
+1. Установите Go 1.25.5+, PostgreSQL 15+, Kafka и Zookeeper.
+2. Загрузите зависимости:
    ```bash
    go mod download
    ```
-
-3. Создайте базу данных и примените миграции:
+3. Создайте базу и примените миграции:
    ```bash
    createdb wb
    psql -d wb -f migrations/000001_init_schema.up.sql
    ```
-
-4. Запустите инфраструктуру (если хотите использовать Docker только для неё):
+4. Поднимите инфраструктуру (опционально через Docker):
    ```bash
-   docker-compose up -d postgres zookeeper kafka kafka-ui
+   docker-compose up -d postgres zookeeper kafka kafka-ui otel-collector jaeger elasticsearch kibana
    ```
-
-5. Экспортируйте переменные окружения (или создайте `.env`):
+5. Задайте переменные окружения (или используйте `.env`):
    ```env
    HTTP_ADDR=:8080
    POSTGRES_DSN=postgres://user:password@localhost:5432/wb?sslmode=disable
    KAFKA_BROKERS=localhost:9092
    KAFKA_TOPIC=orders
+   KAFKA_DLQ_TOPIC=orders.dlq
    KAFKA_GROUP_ID=orders-consumer
+   CACHE_TTL=5m
+   APP_ENV=local
+   LOG_LEVEL=info
+   LOG_JSON=false
+   OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317
+   OTEL_EXPORTER_OTLP_INSECURE=true
+   OTEL_RESOURCE_ATTRIBUTES=service.name=wb-orders,service.version=local
    ```
-
 6. Запустите приложение:
    ```bash
    go run ./cmd
    ```
 
 ## Конфигурация
-Ключевые переменные окружения:
+Ключевые переменные окружения и их значения по умолчанию:
 
-| Переменная        | Назначение                                | Значение по умолчанию                                        |
-|-------------------|-------------------------------------------|--------------------------------------------------------------|
-| `HTTP_ADDR`       | Адрес HTTP-сервера                        | `:8080`                                                      |
-| `POSTGRES_DSN`    | Подключение к PostgreSQL                  | `postgres://user:password@localhost:5432/wb?sslmode=disable` |
-| `KAFKA_BROKERS`   | Адреса брокеров Kafka (через запятую)     | `localhost:9092`                                             |
-| `KAFKA_TOPIC`     | Топик, из которого читаются заказы        | `orders`                                                     |
-| `KAFKA_GROUP_ID`  | Group ID Kafka consumer                   | `orders-consumer`                                            |
+| Переменная                    | Назначение                               | По умолчанию                                                  |
+|-------------------------------|------------------------------------------|---------------------------------------------------------------|
+| `HTTP_ADDR`                   | Адрес HTTP-сервера                       | `:8080`                                                       |
+| `POSTGRES_DSN`                | DSN для подключения к PostgreSQL         | `postgres://user:password@localhost:5432/wb?sslmode=disable`  |
+| `KAFKA_BROKERS`               | Брокеры Kafka (через запятую)            | `localhost:9092`                                              |
+| `KAFKA_TOPIC`                 | Топик для чтения заказов                 | `orders`                                                      |
+| `KAFKA_DLQ_TOPIC`             | Топик для записи некорректных сообщений  | `orders.dlq`                                                  |
+| `KAFKA_GROUP_ID`              | Group ID консьюмера                      | `orders-consumer`                                             |
+| `CACHE_TTL`                   | TTL in-memory кэша                       | `5m`                                                          |
+| `APP_ENV`                     | Окружение приложения                     | `local`                                                       |
+| `LOG_LEVEL`                   | Уровень логирования                      | `info`                                                        |
+| `LOG_JSON`                    | Формат логов в JSON (true/false)         | `false`                                                       |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint для трейсов/метрик/логов   | — (обязателен при включённой телеметрии)                      |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Использовать незащищённый OTLP           | `true`                                                        |
+| `OTEL_SERVICE_NAME`           | Имя сервиса в телеметрии                 | `wb-orders`                                                   |
+| `OTEL_RESOURCE_ATTRIBUTES`    | Доп. атрибуты ресурса OTEL               | `service.name=wb-orders,service.version=local`                |
 
-## API (v1)
-### Получить заказ по UUID
-```http
-GET /order/{orderUID}
-```
+## API v1
+- **Получить заказ по UUID**
+  ```http
+  GET /order/{orderUID}
+  ```
+- Пример:
+  ```bash
+  curl http://localhost:8080/order/b563feb7b2b84b6test
+  ```
+- Формат ответа описан в `api/openapi.yaml`; интерактивная документация доступна по `/docs`.
 
-Пример запроса:
-```bash
-curl http://localhost:8080/order/b563feb7b2b84b6test
-```
+## Миграции и схема
+Базовая схема создаёт таблицы `orders`, `deliveries`, `payments` и `items`, связанные через `order_uid`. Запустите `migrations/000001_init_schema.up.sql` перед стартом приложения.
 
-Пример ответа:
-```json
-{
-  "order_id": "b563feb7b2b84b6test",
-  "track_number": "WBILMTESTTRACK",
-  "entry": "WBIL",
-  "locale": "en",
-  "internal_signature": "",
-  "customer_id": "test",
-  "delivery_service": "meest",
-  "shard_key": "9",
-  "sm_id": 99,
-  "date_created": "2021-11-26T06:22:19Z",
-  "off_shard": "1",
-  "delivery": { "name": "Test Testov", "phone": "+9720000000", "zip": "2639809", "city": "Kiryat Mozkin", "address": "Ploshad Mira 15", "region": "Kraiot", "email": "test@gmail.com" },
-  "payment": { "transaction": "b563feb7b2b84b6test", "request_id": "", "currency": "USD", "provider": "wbpay", "amount": 1817, "payment_dt": 1637907727, "bank": "alpha", "delivery_cost": 1500, "goods_total": 317, "custom_fee": 0 },
-  "items": [ { "chrt_id": "9934930", "track_number": "WBILMTESTTRACK", "price": 453, "rid": "ab4219087a764ae0btest", "name": "Mascaras", "sale": 30, "size": "0", "total_price": 317, "nm_id": 2389212, "brand": "Vivienne Sabo", "status": 202 } ]
-}
-```
-
-## Схема данных
-Основные таблицы в `migrations/000001_init_schema.up.sql`:
-- `orders` — базовая информация о заказе;
-- `deliveries` — данные о доставке;
-- `payments` — данные о платеже;
-- `items` — товары заказа.
-
-## Разработка
-- Тесты: `go test ./...`
+## Тестирование и качество
+- Запуск юнит-тестов: `go test ./...`
 - Форматирование: `go fmt ./...`
 - Линтинг (если установлен): `golangci-lint run`
 
@@ -156,4 +177,4 @@ docker build -t orders-service .
 ```
 
 ## Лицензия
-Проект распространяется под лицензией MIT (если не указано иное).
+MIT, если не указано иное в исходниках.
