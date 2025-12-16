@@ -49,7 +49,6 @@ func (o *OrderRepository) SetOrder(ctx context.Context, order service.Order) err
 	}
 	defer tx.Rollback(ctx)
 
-	// orders
 	if _, err := tx.Exec(ctx, insertOrderQuery,
 		order.OrderUUID,
 		order.TrackNumber,
@@ -66,7 +65,6 @@ func (o *OrderRepository) SetOrder(ctx context.Context, order service.Order) err
 		return err
 	}
 
-	// deliveries
 	if _, err := tx.Exec(ctx, insertDeliveryQuery,
 		order.OrderUUID,
 		order.Delivery.Name,
@@ -80,7 +78,6 @@ func (o *OrderRepository) SetOrder(ctx context.Context, order service.Order) err
 		return err
 	}
 
-	// payments
 	if _, err := tx.Exec(ctx, insertPaymentQuery,
 		order.OrderUUID,
 		order.Payment.Transaction,
@@ -97,7 +94,6 @@ func (o *OrderRepository) SetOrder(ctx context.Context, order service.Order) err
 		return err
 	}
 
-	// items (много строк)
 	for _, it := range order.Items {
 		if _, err := tx.Exec(ctx, insertItemQuery,
 			order.OrderUUID,

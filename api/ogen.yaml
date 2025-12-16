@@ -1,0 +1,6 @@
+package: v1
+generate:
+  server: true
+  client: false
+  models: true
+output: ../internal/api/v1

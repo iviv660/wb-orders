@@ -1,0 +1,214 @@
+openapi: 3.0.3
+info:
+  title: Orders API
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+
+paths:
+  /order/{orderUID}:
+    get:
+      summary: Get order by UID
+      operationId: getOrder
+      parameters:
+        - name: orderUID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Order unique identifier (order_uid)
+      responses:
+        "200":
+          description: Order found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "404":
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /:
+    get:
+      summary: Web UI
+      operationId: index
+      responses:
+        "200":
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  schemas:
+    Order:
+      type: object
+      required:
+        - order_uid
+        - track_number
+        - entry
+        - locale
+        - internal_signature
+        - customer_id
+        - delivery_service
+        - shard_key
+        - sm_id
+        - date_created
+        - off_shard
+        - delivery
+        - payment
+        - items
+      properties:
+        order_uid:
+          type: string
+        track_number:
+          type: string
+        entry:
+          type: string
+        locale:
+          type: string
+        internal_signature:
+          type: string
+        customer_id:
+          type: string
+        delivery_service:
+          type: string
+        shard_key:
+          type: string
+        sm_id:
+          type: integer
+          format: int32
+        date_created:
+          type: string
+          format: date-time
+        off_shard:
+          type: string
+        delivery:
+          $ref: "#/components/schemas/Delivery"
+        payment:
+          $ref: "#/components/schemas/Payment"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Item"
+
+    Delivery:
+      type: object
+      required: [name, phone, zip, city, address, region, email]
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        zip:
+          type: string
+        city:
+          type: string
+        address:
+          type: string
+        region:
+          type: string
+        email:
+          type: string
+
+    Payment:
+      type: object
+      required:
+        - transaction
+        - request
+        - currency
+        - provider
+        - amount
+        - payment_dt
+        - bank
+        - delivery_cost
+        - goods_total
+        - custom_fee
+      properties:
+        transaction:
+          type: string
+        request:
+          type: string
+        currency:
+          type: string
+        provider:
+          type: string
+        amount:
+          type: integer
+          format: int32
+        payment_dt:
+          type: integer
+          format: int32
+        bank:
+          type: string
+        delivery_cost:
+          type: integer
+          format: int32
+        goods_total:
+          type: integer
+          format: int32
+        custom_fee:
+          type: integer
+          format: int32
+
+    Item:
+      type: object
+      required:
+        - chrt_id
+        - track_number
+        - price
+        - rid
+        - name
+        - sale
+        - size
+        - total_price
+        - nm_id
+        - brand
+        - status
+      properties:
+        chrt_id:
+          type: integer
+          format: int64
+        track_number:
+          type: string
+        price:
+          type: integer
+          format: int32
+        rid:
+          type: string
+        name:
+          type: string
+        sale:
+          type: integer
+          format: int32
+        size:
+          type: string
+        total_price:
+          type: integer
+          format: int32
+        nm_id:
+          type: integer
+          format: int32
+        brand:
+          type: string
+        status:
+          type: integer
+          format: int32
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string

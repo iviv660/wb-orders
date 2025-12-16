@@ -1,68 +1,210 @@
 package app
 
 import (
-	"app/internal/api"
-	v1 "app/internal/api/v1"
+	"app/internal/adapter"
+	kaf "app/internal/adapter/kafka"
+	"app/internal/cache"
+	cacheobs "app/internal/cache/obs"
+	orderCache "app/internal/cache/order"
+	"app/internal/closer"
 	"app/internal/config"
 	"app/internal/repository"
+	repoobs "app/internal/repository/obs"
 	repo "app/internal/repository/order"
-	"app/internal/service"
-	"app/internal/service/order"
+	serviceInter "app/internal/service"
+	service "app/internal/service/order"
 	"context"
-	"log"
+	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/segmentio/kafka-go"
 )
 
 type diContainer struct {
-	cfg config.Config
+	kafkaReader *kafka.Reader
+	dlqWriter   *kafka.Writer
+	pgxPool     *pgxpool.Pool
+	ttl         time.Duration
 
-	orderApi api.OrderServer
+	consumer adapter.Consumer
+	svc      serviceInter.Service
+	cache    cache.Cache
+	repo     repository.Repository
 
-	orderService service.Service
-
-	orderRepository repository.OrderRepository
-
-	pool *pgxpool.Pool
+	worker *kaf.Worker
 }
 
 func NewDIContainer() *diContainer {
-	return &diContainer{
-		cfg: config.Load(),
-	}
+	return &diContainer{}
 }
 
-func (d *diContainer) OrderApi(ctx context.Context) api.OrderServer {
-	if d.orderApi == nil {
-		d.orderApi = v1.NewAPI(d.OrderService(ctx))
+func (d *diContainer) Init(ctx context.Context) error {
+	if config.AppConfig == nil {
+		return errors.New("config.AppConfig is nil: call config.Init() first")
 	}
-	return d.orderApi
+
+	if err := d.initTTL(); err != nil {
+		return err
+	}
+	if err := d.initPGX(ctx); err != nil {
+		return err
+	}
+	if err := d.initKafka(); err != nil {
+		return err
+	}
+	return nil
 }
 
-func (d *diContainer) OrderService(ctx context.Context) service.Service {
-	if d.orderService == nil {
-		d.orderService = order.NewService(d.OrderRepository(ctx))
+func (d *diContainer) OrderAdapter(ctx context.Context) (adapter.Consumer, error) {
+	_ = ctx
+	if d.consumer != nil {
+		return d.consumer, nil
 	}
-	return d.orderService
+	if d.kafkaReader == nil {
+		return nil, errors.New("kafka reader is nil: call Init() first")
+	}
+	d.consumer = kaf.New(d.kafkaReader)
+	return d.consumer, nil
 }
 
-func (d *diContainer) OrderRepository(ctx context.Context) repository.OrderRepository {
-	if d.orderRepository == nil {
-		d.orderRepository = repo.NewOrderRepository(d.Pool(ctx))
-	}
-	return d.orderRepository
-}
-
-func (d *diContainer) Pool(ctx context.Context) *pgxpool.Pool {
-	if d.pool != nil {
-		return d.pool
+func (d *diContainer) OrderService(ctx context.Context) (serviceInter.Service, error) {
+	if d.svc != nil {
+		return d.svc, nil
 	}
 
-	pool, err := pgxpool.New(ctx, d.cfg.Postgres.DSN)
+	r, err := d.OrderRepository(ctx)
 	if err != nil {
-		log.Fatalf("failed to create postgres pool: %v", err)
+		return nil, err
+	}
+	c, err := d.OrderCache(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	d.pool = pool
-	return d.pool
+	d.svc = service.New(r, c)
+	return d.svc, nil
+}
+
+func (d *diContainer) OrderRepository(ctx context.Context) (repository.Repository, error) {
+	_ = ctx
+	if d.repo != nil {
+		return d.repo, nil
+	}
+	if d.pgxPool == nil {
+		return nil, errors.New("pgx pool is nil: call Init() first")
+	}
+
+	base := repo.New(d.pgxPool)
+	d.repo = repoobs.Wrap(base)
+
+	return d.repo, nil
+}
+
+func (d *diContainer) OrderCache(ctx context.Context) (cache.Cache, error) {
+	_ = ctx
+	if d.cache != nil {
+		return d.cache, nil
+	}
+	if d.ttl <= 0 {
+		return nil, errors.New("cache ttl is invalid: call Init() first")
+	}
+
+	base := orderCache.New(d.ttl)
+
+	interval := time.Minute
+	if d.ttl < interval {
+		interval = d.ttl
+	}
+	base.StartWorker(interval)
+
+	d.cache = cacheobs.Wrap(base)
+
+	closer.AddNamed("order-cache", func(ctx context.Context) error {
+		base.Close()
+		return nil
+	})
+
+	return d.cache, nil
+}
+
+func (d *diContainer) Worker(ctx context.Context) (*kaf.Worker, error) {
+	if d.worker != nil {
+		return d.worker, nil
+	}
+
+	consumer, err := d.OrderAdapter(ctx)
+	if err != nil {
+		return nil, err
+	}
+	svc, err := d.OrderService(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if d.dlqWriter == nil {
+		return nil, errors.New("dlq writer is nil: call Init() first")
+	}
+
+	d.worker = kaf.NewWorker(consumer, svc, d.dlqWriter)
+	return d.worker, nil
+}
+
+func (d *diContainer) initTTL() error {
+	d.ttl = config.AppConfig.Cache.TTL
+	if d.ttl <= 0 {
+		d.ttl = 5 * time.Minute
+	}
+	return nil
+}
+
+func (d *diContainer) initPGX(ctx context.Context) error {
+	pool, err := pgxpool.New(ctx, config.AppConfig.Postgres.DSN)
+	if err != nil {
+		return err
+	}
+	d.pgxPool = pool
+
+	closer.AddNamed("pgxpool", func(ctx context.Context) error {
+		d.pgxPool.Close()
+		return nil
+	})
+
+	return nil
+}
+
+func (d *diContainer) initKafka() error {
+	cfg := config.AppConfig.Kafka
+
+	if len(cfg.Brokers) == 0 {
+		return errors.New("kafka brokers is empty")
+	}
+	if cfg.Topic == "" {
+		return errors.New("kafka topic is empty")
+	}
+	if cfg.DLQTopic == "" {
+		return errors.New("kafka dlq topic is empty")
+	}
+
+	d.kafkaReader = kafka.NewReader(kafka.ReaderConfig{
+		Brokers: cfg.Brokers,
+		GroupID: cfg.GroupID,
+		Topic:   cfg.Topic,
+	})
+
+	d.dlqWriter = &kafka.Writer{
+		Addr:         kafka.TCP(cfg.Brokers...),
+		Topic:        cfg.DLQTopic,
+		Balancer:     &kafka.Hash{},
+		RequiredAcks: kafka.RequireAll,
+		Async:        false,
+	}
+
+	closer.AddNamed("kafka-reader", func(ctx context.Context) error {
+		return d.kafkaReader.Close()
+	})
+	closer.AddNamed("kafka-dlq-writer", func(ctx context.Context) error {
+		return d.dlqWriter.Close()
+	})
+
+	return nil
 }

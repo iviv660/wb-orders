@@ -1,10 +1,10 @@
 package main
 
 import (
-	"app/internal/adapter/kafka"
 	"app/internal/app"
-	"app/internal/config"
+	"app/internal/closer"
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -13,58 +13,37 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
-	log.Printf("Starting application with config: HTTP=%s, Kafka=%v", cfg.HTTP.Addr, cfg.Kafka.Brokers)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	application, err := app.NewApp(ctx)
 	if err != nil {
-		log.Fatalf("Failed to initialize application: %v", err)
+		log.Fatalf("init app: %v", err)
 	}
 
-	orderService := application.DIContainer().OrderService(ctx)
-
-	kafkaReader := kafka.NewKafkaReader(
-		cfg.Kafka.Brokers,
-		cfg.Kafka.Topic,
-		cfg.Kafka.GroupID,
-	)
-	defer func() {
-		if err := kafkaReader.Close(); err != nil {
-			log.Printf("Error closing Kafka reader: %v", err)
-		}
-	}()
-
-	go func() {
-		log.Printf("Starting Kafka consumer (topic=%s, group=%s)", cfg.Kafka.Topic, cfg.Kafka.GroupID)
-		if err := kafka.RunConsumer(ctx, kafkaReader, orderService); err != nil {
-			log.Printf("Kafka consumer stopped: %v", err)
-		}
-	}()
-
-	go func() {
-		log.Printf("Starting HTTP server on %s", cfg.HTTP.Addr)
-		if err := application.Run(ctx); err != nil {
-			log.Printf("HTTP server stopped: %v", err)
-		}
-	}()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
-
-	log.Println("Shutting down gracefully...")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	cancel()
-
-	if err := application.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Error shutting down HTTP server: %v", err)
+	worker, err := application.DIContainer().Worker(ctx)
+	if err != nil {
+		log.Fatalf("init kafka worker: %v", err)
 	}
 
-	log.Println("Application stopped")
+	errCh := make(chan error, 2)
+
+	go func() { errCh <- worker.Run(ctx) }()
+	go func() { errCh <- application.Run(ctx) }()
+
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("stopped with error: %v", err)
+		}
+		stop()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := closer.CloseAll(shutdownCtx); err != nil {
+		log.Printf("closeAll error: %v", err)
+	}
 }

@@ -6,6 +6,6 @@ type OrderRepository struct {
 	pool *pgxpool.Pool
 }
 
-func NewOrderRepository(pool *pgxpool.Pool) *OrderRepository {
+func New(pool *pgxpool.Pool) *OrderRepository {
 	return &OrderRepository{pool: pool}
 }

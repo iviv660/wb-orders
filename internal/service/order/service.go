@@ -1,18 +1,18 @@
 package order
 
 import (
-	service "app/internal/model"
+	"app/internal/cache"
 	"app/internal/repository"
 )
 
 type Service struct {
-	repo  repository.OrderRepository
-	cache map[string]service.Order
+	repo  repository.Repository
+	cache cache.Cache
 }
 
-func NewService(repo repository.OrderRepository) *Service {
+func New(repo repository.Repository, cache cache.Cache) *Service {
 	return &Service{
 		repo:  repo,
-		cache: make(map[string]service.Order),
+		cache: cache,
 	}
 }

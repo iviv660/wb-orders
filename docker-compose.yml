@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
@@ -16,99 +16,105 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - wb-network
+    networks: [wb-network]
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: wb-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "2181"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - wb-network
+    networks: [wb-network]
 
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: wb-kafka
     depends_on:
       zookeeper:
-        condition: service_healthy
+        condition: service_started
     ports:
-      - "${KAFKA_PORT:-9092}:9092"
+      - "9092:9092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-
-      # ✅ один слушатель, один advertised
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-
-    healthcheck:
-      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
-      interval: 10s
-      timeout: 10s
-      retries: 5
-    networks:
-      - wb-network
+    networks: [wb-network]
 
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.1
     container_name: wb-kafka-ui
     depends_on:
-      kafka:
-        condition: service_healthy
+      - kafka
     ports:
       - "8081:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
-    networks:
-      - wb-network
+    networks: [wb-network]
 
-
-
-  migrate:
-    image: postgres:15-alpine
-    container_name: wb-migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
+  # ---------- OpenTelemetry Collector ----------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.121.0
+    container_name: wb-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
-      - ./migrations:/migrations
-    command: >
-      sh -c "
-        echo 'Применение миграций...' &&
-        for file in /migrations/*.up.sql; do
-          if [ -f \"$$file\" ]; then
-            echo \"Применение: $$file\" &&
-            PGPASSWORD=$${POSTGRES_PASSWORD} psql -h postgres -U $${POSTGRES_USER} -d $${POSTGRES_DB} -f \"$$file\" || true
-          fi
-        done &&
-        echo 'Миграции применены'
-      "
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    networks:
-      - wb-network
-    profiles:
-      - migrate
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      - jaeger
+      - elasticsearch
+    networks: [wb-network]
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    container_name: wb-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    networks: [wb-network]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.2
+    container_name: wb-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    networks: [wb-network]
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.2
+    container_name: wb-kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks: [wb-network]
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: wb-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+    networks: [wb-network]
+
+  # ---------- Application ----------
   app:
     build:
       context: .
@@ -118,18 +124,26 @@ services:
       postgres:
         condition: service_healthy
       kafka:
-        condition: service_healthy
+        condition: service_started
+      otel-collector:
+        condition: service_started
     ports:
-      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTP_PORT}:8080"
     environment:
       HTTP_ADDR: ${HTTP_ADDR}
       POSTGRES_DSN: ${POSTGRES_DSN}
       KAFKA_BROKERS: ${KAFKA_BROKERS}
       KAFKA_TOPIC: ${KAFKA_TOPIC}
       KAFKA_GROUP_ID: ${KAFKA_GROUP_ID}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC}
+
+      APP_ENV: ${APP_ENV}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES}
     restart: unless-stopped
-    networks:
-      - wb-network
+    networks: [wb-network]
 
 volumes:
   postgres_data:

@@ -1,0 +1,18 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet          # встроенный анализатор Go
+    - staticcheck    # мощный набор проверок (в т.ч. бывший gosimple)
+    - errcheck       # непроверенные ошибки
+    - ineffassign    # неиспользуемые присваивания
+    - unused         # неиспользуемый код
+    - revive         # стиль/качество кода
+
+run:
+  tests: true
+  timeout: 3m
+
+issues:
+  exclude-use-default: false

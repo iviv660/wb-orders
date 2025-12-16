@@ -6,8 +6,10 @@ import (
 )
 
 func (s *Service) Get(ctx context.Context, uuid string) (service.Order, error) {
-	if v, ok := s.cache[uuid]; ok {
-		return v, nil
+	key := "order:" + uuid
+
+	if order, err := s.cache.Get(key); err == nil {
+		return order, nil
 	}
 
 	order, err := s.repo.GetOrder(ctx, uuid)
@@ -15,7 +17,6 @@ func (s *Service) Get(ctx context.Context, uuid string) (service.Order, error) {
 		return service.Order{}, err
 	}
 
-	s.cache[uuid] = order
-	
+	_ = s.cache.Set(key, order)
 	return order, nil
 }
