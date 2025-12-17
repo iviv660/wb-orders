@@ -41,7 +41,7 @@
 * **Кэш** (`internal/cache/memory`)
   In-memory TTL-кэш с фоновой очисткой.
 
-* **Worker** (`internal/worker/order`)
+* **kafka** (`internal/adapter/kafka`)
   Kafka consumer → валидация → запись в БД → DLQ при ошибках.
 
 ---
@@ -65,7 +65,7 @@ internal/
   app/                  # DI, lifecycle, bootstrap
   cache/                # TTL in-memory cache
   http/v1/              # HTTP handlers + middleware
-  worker/order/         # Kafka consumer + DLQ
+  adapter/kafka/         # Kafka consumer + DLQ
   service/order/        # Доменная логика
   repository/order/     # PostgreSQL
   otelx/                # OpenTelemetry SDK init
