@@ -15,6 +15,7 @@ import (
 	service "app/internal/service/order"
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -158,22 +159,28 @@ func (d *diContainer) initTTL() error {
 }
 
 func (d *diContainer) initPGX(ctx context.Context) error {
+	log.Printf("[pg] connecting: %s", config.AppConfig.Postgres.DSN)
 	pool, err := pgxpool.New(ctx, config.AppConfig.Postgres.DSN)
 	if err != nil {
+		log.Printf("[pg] connect failed: %v", err)
 		return err
 	}
 	d.pgxPool = pool
+	log.Printf("[pg] pool created")
 
 	closer.AddNamed("pgxpool", func(ctx context.Context) error {
 		d.pgxPool.Close()
 		return nil
 	})
-
 	return nil
 }
 
 func (d *diContainer) initKafka() error {
 	cfg := config.AppConfig.Kafka
+
+	log.Printf("[kafka] brokers=%v topic=%q group=%q dlq=%q",
+		cfg.Brokers, cfg.Topic, cfg.GroupID, cfg.DLQTopic,
+	)
 
 	if len(cfg.Brokers) == 0 {
 		return errors.New("kafka brokers is empty")

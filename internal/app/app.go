@@ -8,6 +8,7 @@ import (
 	"app/internal/otelx"
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -24,41 +25,56 @@ type App struct {
 }
 
 func NewApp(ctx context.Context) (*App, error) {
-	app := &App{}
-	if err := app.initDeps(ctx); err != nil {
+	a := &App{}
+	if err := a.initDeps(ctx); err != nil {
+		log.Printf("[app] init failed: %v", err)
 		return nil, err
 	}
-	return app, nil
+	log.Printf("[app] initialized")
+	return a, nil
 }
 
 func (app *App) Run(ctx context.Context) error {
 	if app.httpServer == nil || app.listener == nil {
 		return errors.New("app not initialized")
 	}
+
+	log.Printf("[http] serving on %s", app.listener.Addr().String())
 	err := app.httpServer.Serve(app.listener)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("[http] serve error: %v", err)
 		return err
 	}
+
+	log.Printf("[http] stopped")
 	return nil
 }
 
 func (app *App) initDeps(ctx context.Context) error {
-	funcs := []func(context.Context) error{
-		app.initConfig,
-		app.initOTel,
-		app.initLogger,
-		app.initCloser,
-		app.initDi,
-		app.initInfra,
-		app.initListener,
-		app.initHTTPServer,
-		app.registerClosers,
+	steps := []struct {
+		name string
+		fn   func(context.Context) error
+	}{
+		{"config", app.initConfig},
+		{"otel", app.initOTel},
+		{"logger", app.initLogger},
+		{"closer", app.initCloser},
+		{"di", app.initDi},
+		{"infra", app.initInfra},
+		{"listener", app.initListener},
+		{"http-server", app.initHTTPServer},
+		{"register-closers", app.registerClosers},
 	}
-	for _, f := range funcs {
-		if err := f(ctx); err != nil {
+
+	for _, s := range steps {
+		log.Printf("[app] init %s...", s.name)
+		if err := s.fn(ctx); err != nil {
+			log.Printf("[app] init %s failed: %v", s.name, err)
 			return err
 		}
+		log.Printf("[app] init %s ok", s.name)
 	}
+
 	return nil
 }
 

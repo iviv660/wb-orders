@@ -45,7 +45,7 @@ func CloseAll(ctx context.Context) error {
 }
 
 func Configure(signals ...os.Signal) {
-	globalCloser.handleSignal(signals...)
+	go globalCloser.handleSignal(signals...)
 }
 
 func New(signals ...os.Signal) *Closer {

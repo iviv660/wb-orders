@@ -24,11 +24,14 @@ exporters:
   prometheus:
     endpoint: 0.0.0.0:8889
 
-  elasticsearch:
-    endpoints: [ "http://elasticsearch:9200" ]
+  elasticsearch/logs:
+    endpoints: ["http://elasticsearch:9200"]
     logs_index: "otel-logs-%{yyyy.MM.dd}"
+    timeout: 10s
+
+  elasticsearch/traces:
+    endpoints: ["http://elasticsearch:9200"]
     traces_index: "otel-traces-%{yyyy.MM.dd}"
-    metrics_index: "otel-metrics-%{yyyy.MM.dd}"
     timeout: 10s
 
 service:
@@ -36,12 +39,14 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/jaeger, elasticsearch]
+      exporters: [otlp/jaeger, elasticsearch/traces]
+
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [prometheus, elasticsearch]
+      exporters: [prometheus]
+
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [elasticsearch]
+      exporters: [elasticsearch/logs]
